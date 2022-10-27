@@ -1,0 +1,936 @@
+---
+title: 'Anxious Twitting: Decoding the Cyber-Phenotype of Anxiety'
+author: "DZ"
+date: '2022-05-10'
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r include=FALSE}
+library(tidyverse)
+library(tidytext)
+library(purrr)
+library(haven)
+library(SnowballC)
+library(stopwords)
+library(scales)
+library(ggpubr)
+library(lubridate)
+library(patchwork)
+library(psych)
+options("scipen"=999, "digits" = 4)
+
+data_tw <- read_csv("data_tw.csv")
+```
+
+## How many users and Tweets by condition
+
+```{r echo=FALSE}
+data_tw%>%
+  group_by(Condition)%>%
+  summarize(screenName = n_distinct(screenName))
+
+## How many tweets by condition
+freq_tw <- data_tw%>%
+  count(Condition)
+
+chisq.test(freq_tw$n, p = c(1/2, 1/2))
+```
+
+
+
+## Text Length for anxious and control users
+
+```{r echo=FALSE}
+data_a <- data_tw%>%
+  filter(Condition == "Anxious")
+summary(data_a$TextLength)
+
+data_h <- data_tw%>%
+  filter(Condition == "Healthy")
+summary(data_h$TextLength)
+
+kruskal.test(TextLength ~Condition, data =data_tw)
+```
+
+```{r echo=FALSE}
+data_tw %>%
+  filter(TextLength < 250)%>%
+  ggplot(aes(x = TextLength, fill = Condition)) + 
+  geom_histogram(binwidth = 5) +
+  labs(y = "Tweet frequency", x = "Text Length", 
+       title = "Distribution of text length by condition") +
+  theme_bw() 
+```
+
+
+
+## Comparing Tweet frequency across conditions by day of the week
+```{r echo=FALSE}
+data_tw<-data_tw%>%
+  mutate(timestamp=lubridate::ymd_hms(created),
+         day_of_week=lubridate::wday(timestamp, label=TRUE),
+         day_weekday=(lubridate::wday(timestamp) %in% 2:6),
+         month=lubridate::month(timestamp),
+         hour=lubridate::hour(timestamp))%>%
+  na.omit()
+
+frequency_by_day <- data_tw%>%
+  group_by(Condition)%>%
+  count(day_of_week, sort=TRUE)
+
+frequency_by_day
+
+data_tw%>%
+  group_by(Condition)%>%
+  count(day_of_week, sort=TRUE)%>%
+  ggplot(aes(x = `day_of_week`, y = n, group = Condition, color = Condition)) +
+  geom_line(size = 1.5) + 
+  labs(y = "Tweet frequency", x = "", title = "Frequency of Tweets by day") + 
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), 
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        legend.position = "none") + 
+  theme_bw()
+
+
+chi_day <- table(data_tw$Condition, data_tw$day_of_week)
+chisq.test(chi_day)
+
+```
+
+
+
+## Comparing Tweet frequency across conditions by weekday/weekend
+```{r echo=FALSE}
+frequency_by_weekend <- data_tw%>%
+  group_by(Condition)%>%
+  count(day_weekday, sort=TRUE)
+frequency_by_weekend
+
+frequency_by_weekend$day_weekday <- as.factor(frequency_by_weekend$day_weekday)
+frequency_by_weekend$day_weekday <- recode_factor(frequency_by_weekend$day_weekday,
+                                                  `TRUE`="Weekday",`FALSE` = "Weekend")
+
+frequency_by_weekend%>%
+  ggplot(aes(x = `day_weekday`, y = n, group = Condition, color = Condition)) +
+  geom_line(size = 1.5) + 
+  labs(y = "Tweet Frequency", x = "", title = "Frequency of Tweets weekday/weekend") + 
+  theme_bw()
+```
+
+
+
+## Time of day by condition
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+tweets_by_hour <- data_tw%>%
+  count(Condition, hour)%>%
+  pivot_wider(names_from = Condition, values_from = n)
+
+tweets_by_hour
+
+data_tw%>%
+  count(Condition, hour)%>%
+  ggplot(aes(x = hour, y= n, fill = Condition, color = Condition)) + 
+  geom_smooth() +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  labs(x = "Hours", y = "Tweet frequency", title = "Distribution of hourly Tweet frequency") + 
+  theme(axis.title = element_text(face = "bold"),
+        legend.title = element_text(face = "bold")) +
+  theme_bw()
+
+tweets_by_hour_1 <- tweets_by_hour%>%
+  pivot_longer(cols = Anxious:Healthy, names_to = "Condition", values_to = "n")
+
+## Anova assumptions
+library(e1071)
+library(car)
+skewness(tweets_by_hour_1$n)
+kurtosis(tweets_by_hour_1$n)
+leveneTest(tweets_by_hour_1$n ~ tweets_by_hour_1$Condition, data = tweets_by_hour_1)
+
+## Running anova
+anova_by_hour <- aov(n ~ Condition*hour, tweets_by_hour_1)
+summary(anova_by_hour)
+```
+
+
+## Tokenizing and plotting common words by condition
+```{r echo=FALSE}
+
+data_tw_tkn <- data_tw%>%
+  select(text,screenName,created,Condition,TextLength,timestamp,day_of_week,
+         day_weekday,hour)%>%
+  unnest_tokens(word, text)
+
+## add a column counting how many words per condition
+data_tw_tkn_1 <- data_tw_tkn%>%
+  count(word, Condition, sort = TRUE)%>%
+  ungroup()
+
+## remove stopwords and plot word frequency by condition
+data_tw_tkn_2 <- data_tw_tkn_1%>%
+  filter(!(word %in% stopwords(source = "snowball")))%>%
+  filter(!word %in% c("ea","fef","bf","ed","eb","bbe","bbf","n","bae","ec","baa","de","fff","ng",
+                      "fb","af","cb","f","fe","ff","fd","na","ko"))
+
+data_tw_tkn_2 <- data_tw_tkn_2%>%
+  group_by(Condition)%>%
+  mutate(word = reorder(word, n))%>%
+  ungroup()
+
+## replace specific words
+data_tw_tkn_2$word <- data_tw_tkn_2$word%>%
+  str_replace("^u$", "you")%>%
+  str_replace("^m$", "me")%>%
+  str_replace("^don$", "don't")%>%
+  str_replace("^ll$", "will")%>%
+  str_replace("^hes$", "he")%>%
+  str_replace("^th$", "the")%>%
+  str_replace("^nd$", "and")%>%
+  str_replace("^b$", "be")%>%
+  str_replace("^d$", "would")%>%
+  str_replace("^bc$", "because")%>%
+  str_replace("^bb$", "bye")%>%
+  str_replace("^c$", "see")%>%
+  str_replace("^thi$", "nothing")%>%
+  str_replace("ar$", "are")%>%
+  str_replace("wa$", "want")%>%
+  str_replace("^thei$", "they")%>%
+  str_replace("^im$","i")%>%
+  str_replace("^e$","everyone")%>%
+  str_replace("^fc$","hope")%>%
+  str_replace("^fa$","respect")
+
+## plot
+data_tw_tkn_2%>%
+  group_by(Condition)%>%
+  slice_max(n, n = 10)%>%
+  ungroup()%>%
+  mutate(word = reorder(word, n))%>%
+  ggplot(aes(n, word, fill = Condition)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~Condition, scales = "free_y") +
+  labs(x = "Condition",
+       y = NULL) + 
+  scale_x_continuous(labels = function(x) format(x, scientific = FALSE))
+```
+
+
+
+## Sentiment analysis
+
+## Positive and negative sentiment by condition
+```{r echo=FALSE, warning=FALSE}
+library(textdata)
+
+## Create column with sentiment via bing lexicon
+data_tw_tkn <- data_tw_tkn%>%
+  full_join(get_sentiments("bing"), by="word")
+
+## rename column 'sentiment' as 'sent_bing' and turn it into a factor
+data_tw_tkn <- rename(data_tw_tkn, sent_bing = sentiment)
+data_tw_tkn$sent_bing <- as.factor(data_tw_tkn$sent_bing)
+
+## Second, use lexicon 'nrc'
+## Create column with sentiment via nrc lexicon
+data_tw_tkn <- data_tw_tkn%>%
+  full_join(get_sentiments("nrc"), by="word")
+
+## rename column 'sentiment' as 'sent_nrc'
+data_tw_tkn <- rename(data_tw_tkn, sent_nrc = sentiment)
+data_tw_tkn$sent_nrc <- as.factor(data_tw_tkn$sent_nrc)
+
+## Third, use lexicon 'afinn'
+## Create column with sentiment via afinn lexicon
+data_tw_tkn <- data_tw_tkn%>%
+  full_join(get_sentiments("afinn"), by="word")
+
+## rename column 'value' as 'sent_value'
+data_tw_tkn <- rename(data_tw_tkn, sent_value = value)
+
+## filter NA in nrc_text, nrc_desc, bing_text, and bing_desc
+data_tw_tknn <- data_tw_tkn%>%
+  filter(!if_all(-c(sent_bing, sent_nrc, sent_value,Condition), ~ is.na(.)), 
+         if_all(c(sent_bing, sent_nrc, sent_value,Condition), ~ !is.na(.)))
+
+## count how many positive and negative words by condition
+data_tw_tknn%>%
+  group_by(Condition)%>%
+  count(sent_bing, sort = TRUE)
+
+## plot proportion of positive and negative words by condition
+data_tw_tknn%>%
+  ggplot(aes(sent_bing, group = Condition)) + 
+  geom_bar(aes(y = ..prop..,fill = factor(..x..)), stat="count") +
+  geom_text(aes( label = scales::percent(..prop..),
+                 y=..prop..), stat="count", vjust = 1.5, color = "white",
+            size = 8) +
+  scale_y_continuous(labels=scales::percent) + 
+  labs(x = "", y = "Proportion", title = "Proportion of negative and positive words",
+       legend = "")+
+  theme_bw() +
+  facet_grid(~Condition) 
+
+## run chi square between pos/neg words and condition
+chi_sq_bing <- data_tw_tknn%>%
+  select(Condition, sent_bing)
+tbl = table(chi_sq_bing$Condition, chi_sq_bing$sent_bing)
+chisq.test(tbl)
+
+```
+
+
+## Common positive and negative words for Anxious users
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+data_tw_tknn %>%
+  select(Condition,word,sent_bing)%>%
+  filter(Condition == "Anxious") %>%
+  group_by(sent_bing) %>%
+  count(word) %>%
+  mutate(prop = n/sum(n)) %>%
+  arrange(desc(n)) %>%
+  slice_head(n = 20) %>%
+  pivot_wider(names_from = sent_bing, values_from = c(n, word, prop)) %>%
+  unnest() %>%
+  relocate(n_negative,word_negative,prop_negative)
+```
+
+
+## Common positive and negative words for Control users
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+data_tw_tknn %>%
+  select(Condition,word,sent_bing)%>%
+  filter(Condition == "Healthy") %>%
+  group_by(sent_bing) %>%
+  count(word) %>%
+  mutate(prop = n/sum(n)) %>%
+  arrange(desc(n)) %>%
+  slice_head(n = 20) %>%
+  pivot_wider(names_from = sent_bing, values_from = c(n, word, prop)) %>%
+  unnest() %>%
+  relocate(n_negative,word_negative,prop_negative)
+```
+
+
+## Qualitative description of sentiment by condition
+```{r echo=FALSE, warning=FALSE}
+## count frequency of word description by condition 
+data_tw_tknn%>%
+  group_by(Condition)%>%
+  count(sent_nrc, sort=TRUE) %>%
+  pivot_wider(names_from = Condition, values_from = c(sent_nrc,n)) %>%
+  unnest() %>%
+  relocate(sent_nrc_Healthy,n_Healthy)
+
+## plot frequency of word description by condition 
+plot_nrc_1 <- data_tw_tknn%>%
+  group_by(Condition)%>%
+  count(sent_nrc, sort=TRUE)%>%
+  ggplot(aes(x = `sent_nrc`, y = n, group = Condition, color = Condition)) +
+  geom_line(size = 1.5) + 
+  labs(y = "Frequency", x = "", 
+       title = "") + 
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), 
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        legend.position = "none",
+        legend.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+## plot proportion of nrc sentiments by condition
+nrc <- data_tw_tknn%>%
+  group_by(Condition)%>%
+  count(sent_nrc)%>%
+  pivot_wider(names_from = sent_nrc, values_from = n)%>%
+  mutate(sum = as.character(rowSums(select(cur_data(), is.numeric))))%>%
+  summarise_if(is.numeric, ~. / as.numeric(sum))%>%
+  pivot_longer(cols = anger:trust, names_to = "sent_nrc", values_to = "n")
+
+plot_nrc_2 <- nrc%>%
+  ggplot(aes(x=sent_nrc, y=n, fill=Condition)) + 
+  geom_bar(aes(y = n), position = "dodge", stat = "identity") +
+  geom_text(aes(x=sent_nrc, y = n, label= paste0(round((100*n),1),"%")), 
+            position = position_dodge(width = 0.9), 
+            vjust = 1.5, color = "black", size = 5) + 
+  scale_y_continuous(labels=percent) + 
+  labs(x = "", y = "Percentage", title = "Sentiment-related words") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position = "none",
+        panel.background = element_rect(fill = "gray100", color = "gray40", size = 0.8),
+        panel.grid.major = element_line(color = "gray80"))
+
+(plot_nrc_1 + plot_nrc_2) + plot_annotation(title = 'Sentiment analysis with NRC Lexicon ',
+                                            theme = theme(plot.title = element_text(hjust = 0.5)))
+
+## run chi square between nrc words and condition
+chi_sq_nrc <- data_tw_tknn%>%
+  select(Condition, sent_nrc)
+tbl1 <- table(chi_sq_bing$Condition, chi_sq_nrc$sent_nrc)
+chisq.test(tbl1)
+
+```
+
+
+## Descriptive statistics of sentiment value
+
+```{r echo=FALSE}
+
+tot_samp <- describe(data_tw_tknn$sent_value)
+
+descr_a <- data_tw_tknn%>%
+  filter(Condition=="Anxious")
+anx_samp <- describe(descr_a$sent_value)
+
+descr_c <- data_tw_tknn%>%
+  filter(Condition=="Healthy")
+cont_samp <- describe(descr_c$sent_value)
+
+ddff <- rbind(tot_samp,anx_samp,cont_samp)
+row.names(ddff) <- c("total sample","Anxious","Control")
+ddff
+
+## Kolmogorov Smirnov test to test if distributions are different
+ks.test(descr_a$sent_value, descr_c$sent_value)
+```
+
+
+
+## Plot Sentiment value by condition
+
+```{r echo=FALSE}
+## plot Sentiment value by condition
+data_tw_tknn%>%
+  ggplot(aes(sent_value, fill = Condition))+
+  geom_density(alpha = 0.6)  +
+  labs(y = "Density", x = "", title = "Sentiment value distribution") + 
+  theme_bw() 
+```
+
+```{r include=FALSE}
+## Feature engineering and prepping ML models
+## remove stopwords
+data_anx_stem <- data_tw_tknn%>%
+  anti_join(stop_words)
+
+## stem words
+data_anx_stem <- data_anx_stem%>%
+  mutate(stem = wordStem(word))
+
+## run tf-idf
+anx_tf_idf <- data_anx_stem%>%
+  count(Condition, stem, sort = TRUE)%>%
+  bind_tf_idf(stem, Condition, n)
+
+## join tf-idf dataset with full dataset
+data_anx_stem1 <- full_join(data_anx_stem, anx_tf_idf)
+
+## select variables of interest and make chr as factor
+data_anx_stem2 <- data_anx_stem1%>%
+  select(screenName, Condition, TextLength,day_of_week,day_weekday,
+         hour,sent_bing,sent_nrc,sent_value,tf_idf) %>%
+  mutate_at(c('day_of_week','day_weekday','sent_bing','sent_nrc'), as.numeric)%>%
+  na.omit()
+
+## summarise variables of interest by participant
+anx_stemmed <- data_anx_stem2%>%
+  group_by(screenName, Condition)%>%
+  summarise_all(mean)%>%
+  ungroup()
+
+## Prep ML models
+library(tidymodels)
+
+## Split train/test dataset
+set.seed(123)
+
+token_twts_split <- initial_split(anx_stemmed)
+token_twts_train <- training(token_twts_split)
+token_twts_test <- testing(token_twts_split)
+
+set.seed(234)
+token_twts_folds <- vfold_cv(token_twts_train, strata = Condition)
+
+## Prep recipe - i.e., feature engineering dataset
+library(textrecipes)
+
+token_rec <- recipe(Condition ~ TextLength + day_of_week + day_weekday + 
+                      hour + sent_bing + sent_nrc + sent_value + tf_idf, 
+         data = token_twts_train)
+```
+
+## Machine learning models
+
+## Null model
+
+```{r echo=FALSE}
+## token model
+twt_null <- null_model()%>%
+  set_engine("parsnip")%>%
+  set_mode("classification")
+
+null_rs_twt <- workflow()%>%
+  add_recipe(token_rec)%>%
+  add_model(twt_null)%>%
+  fit_resamples(token_twts_folds)
+
+null_rs_twt%>%
+  collect_metrics()
+
+```
+
+
+## Lasso Regression
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+## model specification
+lasso_spec <- multinom_reg(penalty = tune(), mixture = 1)%>%
+  set_mode("classification")%>%
+  set_engine("glmnet")
+
+## model workflow
+lasso_wf <- workflow(token_rec, lasso_spec)
+
+# set grid of values for tuning hyper parameter 
+lasso_grid <- grid_regular(penalty(range = c(-5, 0)), levels = 20)
+
+## this accelerates computational processes by allocating more core processing power
+doParallel::registerDoParallel()
+set.seed(2021)
+
+## train models
+lasso_result <- tune_grid(lasso_wf,
+                          token_twts_folds,
+                          grid = lasso_grid)
+
+## plot how accuracy and roc_auc drop as regularization increases
+autoplot(lasso_result)
+
+## select best regularization values
+show_best(lasso_result)
+
+## we pick best option within one SD
+final_penalty_lasso <- lasso_result%>%
+  select_by_one_std_err(metric = "roc_auc", desc(penalty))
+
+final_lasso <- lasso_wf%>%
+  finalize_workflow(final_penalty_lasso)%>%
+  last_fit(token_twts_split)
+
+## Evaluate model accuracy
+collect_metrics(final_lasso)
+
+## See confusion matrix
+collect_predictions(final_lasso)%>%
+  conf_mat(Condition, .pred_class)
+
+## Plot confusion matrix
+collect_predictions(final_lasso)%>%
+  conf_mat(Condition, .pred_class)%>%
+  autoplot(type = "heatmap")
+
+```
+
+
+## Naive Bayes 
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(discrim)
+library(naivebayes)
+
+# model specification
+nb_spec <- naive_Bayes()%>%
+  set_mode("classification")%>%
+  set_engine("naivebayes")
+
+# model workflow
+token_nb_wf <- workflow() %>%
+  add_recipe(token_rec)
+
+## fit NB
+nb_fit_token <- token_nb_wf %>%
+  add_model(nb_spec) %>%
+  fit(data = token_twts_train)
+
+## train models
+set.seed(227)
+token_nb_wf_2 <- workflow() %>%
+  add_recipe(token_rec) %>%
+  add_model(nb_spec)
+
+## estimate how well the model performs
+nb_tw_results <- fit_resamples(
+  token_nb_wf_2, token_twts_folds,
+  control = control_resamples(save_pred = TRUE)
+) 
+
+## collect metrics and predictions
+collect_metrics(nb_tw_results)
+collect_predictions(nb_tw_results)
+
+## plot confusion matrix
+conf_mat_resampled(nb_tw_results, tidy = FALSE) %>%
+  autoplot(type = "heatmap")
+
+```
+
+
+## Random Forests
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(ranger)
+
+## bootstrapped re-sampling (from rsample package)
+ranger_folds_tw <- bootstraps(token_twts_train, strata = Condition)
+
+## model spec
+ranger_spec <- rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+  
+## model workflow
+ranger_workflow_tw <- workflow() %>%
+  add_recipe(token_rec) %>%
+  add_model(ranger_spec)
+
+## tunning random forests
+doParallel::registerDoParallel()
+set.seed(224)
+ranger_tune_tw <- tune_grid(ranger_workflow_tw, 
+                            resamples = ranger_folds_tw,
+                            grid = 20)
+
+
+## explore results
+show_best(ranger_tune_tw, metric = "accuracy")
+autoplot(ranger_tune_tw)
+
+## fit with best fold
+set.seed(469)
+final_rf_tw <- ranger_workflow_tw %>%
+  finalize_workflow(select_best(ranger_tune_tw, metric = "accuracy"))
+
+set.seed(470)
+tw_fit <- last_fit(final_rf_tw, token_twts_split)
+
+## evaluate metrics
+collect_metrics(tw_fit)
+
+## see confusion matrix
+collect_predictions(tw_fit)%>%
+  conf_mat(Condition, .pred_class)
+
+## plot confusion matrix
+collect_predictions(tw_fit)%>%
+  conf_mat(Condition, .pred_class)%>%
+  autoplot(type = "heatmap")
+
+```
+
+
+## Bind ROC for different models and plot
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+mroc_nb <- collect_predictions(nb_tw_results)%>%
+  roc_curve(Condition, .pred_Anxious)
+mroc_nb$model <- "Naive bayes"
+
+mroc_lasso <- collect_predictions(final_lasso)%>%
+  roc_curve(Condition, .pred_Anxious)
+mroc_lasso$model <- "LASSO"
+
+mroc_ranger <- collect_predictions(tw_fit)%>%
+  roc_curve(Condition, .pred_Anxious)
+mroc_ranger$model <- "Random Forests"
+
+rocs <- full_join(mroc_nb,mroc_lasso)
+rocs_1 <- full_join(mroc_ranger,rocs)
+rocs_1%>%
+  ggplot(aes(1 - specificity, sensitivity, color = model)) +
+  geom_abline(slope = 1, color = "gray50", lty = 2, alpha = 0.8) +
+  geom_path(size = 1, alpha = 0.7) + 
+  labs(color = "Model")
+
+
+```
+
+
+## Permutation-based Variable importance 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(vip)
+
+best_auc <- select_best(ranger_tune_tw, "roc_auc")
+final_rf <- finalize_model(ranger_spec, best_auc)
+
+token_prep <- prep(token_rec)
+juiced <- juice(token_prep)
+
+set.seed(230)
+
+final_rf %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(Condition ~ ., data = juice(token_prep)) %>%
+  vip(geom = "col")
+```
+
+
+## Expected metrics when applying RF model to new data
+
+```{r echo=FALSE}
+set.seed(231)
+
+final_wf <- workflow() %>%
+  add_recipe(token_rec) %>%
+  add_model(final_rf)
+
+final_result <- final_wf %>%
+  last_fit(token_twts_split)
+
+final_result %>%
+  collect_metrics()
+
+```
+
+
+## Latent Profile Analysis
+
+## Comparing AIC/BIC/AWE/CLC and KIC across models
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyLPA)
+
+set.seed(232)
+## model with tokenized tweets
+Model_twt <- anx_stemmed%>%
+  select("TextLength","day_of_week","day_weekday","hour","sent_bing",
+         "sent_nrc","sent_value","tf_idf")%>%
+  single_imputation()%>%
+  estimate_profiles(1:6, variances = c("equal", "varying", "equal", "varying"),
+                    covariances = c("zero", "zero", "equal", "varying"))%>%
+  compare_solutions(statistics = c("AIC","BIC","AWE", "CLC", "KIC"))
+
+Model_twt
+```
+
+## Fitting possible models based on AIC/BIC
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(233)
+M1C2 <- anx_stemmed%>%
+  select("TextLength","day_of_week","day_weekday","hour","sent_bing",
+         "sent_nrc","sent_value","tf_idf")%>%
+  single_imputation()%>%
+  estimate_profiles(2, variances = "equal",covariances="zero")
+M1C2
+
+set.seed(234)
+M1C3 <- anx_stemmed%>%
+  select("TextLength","day_of_week","day_weekday","hour","sent_bing",
+         "sent_nrc","sent_value","tf_idf")%>%
+  single_imputation()%>%
+  estimate_profiles(3, variances = "equal",covariances="zero")
+M1C3
+
+set.seed(235)
+M1C4 <- anx_stemmed%>%
+  select("TextLength","day_of_week","day_weekday","hour","sent_bing",
+         "sent_nrc","sent_value","tf_idf")%>%
+  single_imputation()%>%
+  estimate_profiles(4, variances = "equal",covariances="zero")
+M1C4
+
+set.seed(236)
+M1C5 <- anx_stemmed%>%
+  select("TextLength","day_of_week","day_weekday","hour","sent_bing",
+         "sent_nrc","sent_value","tf_idf")%>%
+  single_imputation()%>%
+  estimate_profiles(5, variances = "equal",covariances="zero")
+M1C5
+
+set.seed(237)
+M1C6 <- anx_stemmed%>%
+  select("TextLength","day_of_week","day_weekday","hour","sent_bing",
+         "sent_nrc","sent_value","tf_idf")%>%
+  single_imputation()%>%
+  estimate_profiles(6, variances = "equal",covariances="zero")
+M1C6
+
+```
+
+## Plotting AIC/BIC/Entropy to select best model
+
+```{r echo=FALSE}
+`Number of Profiles` <- c(2,3,4,5,6)
+AIC <- c(19056.72,18650.19,18340.62,18059.02,17926.60)
+BIC <- c(19175.56,18811.47,18544.34,18305.18,18215.20)
+Entropy <- c(0.89,0.93,0.93,0.91,0.92)
+Model_metrics <- data.frame(`Number of Profiles`,AIC,BIC,Entropy)
+
+scl = 20000
+Model_metrics %>%
+  ggplot(aes(x = `Number of Profiles`)) + 
+  geom_line(aes(y = AIC, colour = "AIC"), size = 1.5) +
+  geom_line(aes(y = BIC, colour = "BIC"), size = 1.5) + 
+  geom_line(aes(y = Entropy*scl, colour = "Entropy"), size = 1.5) +
+  scale_y_continuous(sec.axis = sec_axis(~./scl, name = "Entropy")) +
+  labs(colour = "Index", y = "AIC / BIC") + 
+  theme(legend.position="bottom") 
+```
+
+
+## Table with standardized indicators and plot profiles
+``` {r echo=FALSE, message=FALSE}
+df2 <-  get_data(M1C4)
+LPA_data <- full_join(df2,anx_stemmed)%>%
+  select(Condition,Class,timestamp:tf_idf)
+
+write_csv(LPA_data, "LPA_data.csv") 
+## add Z column for each variable in SPSS because R provides different scores
+setwd("D:/Research/Vasilis Stavropoulos/Digital Phenotype/Twitter data/Anxiety output")
+LPA_data1 <- read_sav("LPA_data.sav")
+LPA_data1 <- LPA_data1%>%
+  select(Class,ZTextLength,Zday_of_week,Zday_weekday,Zhour,Zsent_bing,
+         Zsent_nrc,Zsent_value,Ztf_idf) %>%
+  group_by(Class) %>%
+  summarise(ZTextLength=mean(ZTextLength),
+            Zday_of_week=mean(Zday_of_week),
+            Zday_weekday=mean(Zday_weekday),
+            Zhour=mean(Zhour),
+            Zsent_bing=mean(Zsent_bing),
+            Zsent_nrc=mean(Zsent_nrc),
+            Zsent_value=mean(Zsent_value),
+            Ztf_idf=mean(Ztf_idf)) %>%
+  na.omit()
+LPA_data1
+
+LPA_data2 <- LPA_data1%>%
+  pivot_longer(cols=c(ZTextLength,Zday_of_week,Zday_weekday,Zhour,Zsent_bing,
+         Zsent_nrc,Zsent_value,Ztf_idf), names_to="Model_Indicators",
+               values_to="Z_Scores")
+
+LPA_data2$Class <- as.factor(LPA_data2$Class)
+levels(LPA_data2$Class) <- c("Low sentiment","High sentiment","Normative","Self-distancing")
+
+ttt <- LPA_data2 %>%
+  ggplot(aes(x=Model_Indicators, y=Z_Scores, group=Class, color=Class)) + 
+  geom_point(size = 1.5) + geom_line(size = 1.5) +
+  labs(x= "", y = "Z scores", color = "") + 
+  theme(axis.title.x = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1.0),
+        legend.position="bottom") +
+  scale_y_continuous(breaks=seq(-6.0, 6.0, by = 1)) +
+  scale_x_discrete(labels=c("Zday_of_week"="Day of week","Zday_weekday"="Weekday",
+                            "Zhour"="Hour of the day","Zsent_bing"="Sentiment (Bing)",
+                            "Zsent_nrc"="Sentiment (NRC)","Zsent_value"="Sentiment (Afinn)",
+                            "ZTextLength"="Text Length","Ztf_idf"="Tf idf")) +
+  theme(text=element_text(size = 20))
+
+ggsave("Figure_12.tiff", ttt, width = 8, height = 8, dpi = 300)
+
+```
+
+## Best model - 4 Profiles - Make dataset including profile and count frequency of users by class
+```{r echo=FALSE, message=FALSE}
+ddff <- df2 %>%
+  select(Class)
+anx_stemmed$Class <- df2$Class
+
+anx_stemmed%>%
+  group_by(Class)%>%
+  count(Condition) %>%
+  pivot_wider(names_from = Condition, values_from = n)%>%
+  mutate(Total = Anxious + Healthy)
+  
+```
+
+
+## Exploring self-distancing profile
+``` {r echo=FALSE, message=FALSE}
+## Explore tf_idf
+anx_stemmed %>%
+  select(screenName,Class,tf_idf)%>%
+  filter(Class==4)%>%
+  arrange(desc(tf_idf))
+
+## Make class a factor and divide sample into class 4 and the rest
+dif_class <- anx_stemmed
+dif_class$Class <- as.factor(dif_class$Class)
+dif_class2 <- dif_class %>%
+  mutate(OL = fct_collapse(Class,
+                           `Rest of the sample` = c("1","2","3"),
+                           `Self-distancing` = "4"))%>%
+  select(screenName,OL)
+
+## Create one dataset and tokenize
+dif_class3 <- full_join(data_tw,dif_class2)
+dif_class4 <- dif_class3 %>%
+  select(Condition, OL, text, screenName)%>%
+  na.omit()%>%
+  unnest_tokens(word,text)
+
+## remove stopwords and plot word frequency by condition
+dif_class5 <- dif_class4 %>%
+  select(screenName,word,OL) %>%
+  filter(!(word %in% stopwords(source = "snowball")))%>%
+  filter(!word %in% c("ea","fef","bf","ed","eb","bbe","bbf","n","bae","ec","baa","de","f","fff","ng",
+                      "fb","af","cb","f","fe","ff","fd","na","ko"))
+
+## replace specific words
+dif_class5$word <- dif_class5$word%>%
+  str_replace("^u$", "you")%>%
+  str_replace("^m$", "me")%>%
+  str_replace("^don$", "don't")%>%
+  str_replace("^ll$", "will")%>%
+  str_replace("^hes$", "he")%>%
+  str_replace("^th$", "the")%>%
+  str_replace("^nd$", "and")%>%
+  str_replace("^b$", "be")%>%
+  str_replace("^d$", "would")%>%
+  str_replace("^bc$", "because")%>%
+  str_replace("^bb$", "bye")%>%
+  str_replace("^c$", "see")%>%
+  str_replace("^thi$", "nothing")%>%
+  str_replace("ar$", "are")%>%
+  str_replace("wa$", "want")%>%
+  str_replace("^thei$", "they")%>%
+  str_replace("^im$","i")%>%
+  str_replace("^e$","everyone")%>%
+  str_replace("^fc$","hope")%>%
+  str_replace("^fa$","respect")
+
+## Examining word relevance in Class 4
+df_c5 <- dif_class5%>%
+  group_by(OL)%>%
+  count(word, sort = TRUE)%>%
+  mutate(word = reorder(word, n))%>%
+  mutate(prop = n/sum(n)) %>%
+  slice_head(n = 20)%>%
+  pivot_wider(names_from = OL, values_from = c(n, word, prop)) %>%
+  unnest()%>%
+  relocate(`n_Rest of the sample`,`word_Rest of the sample`,`prop_Rest of the sample`)
+df_c5
+
+dif_class5%>%
+  group_by(OL)%>%
+  count(word, sort = TRUE)%>%
+  mutate(word = reorder_within(word, n, OL))%>%
+  mutate(prop = n/sum(n)) %>%
+  slice_head(n = 5)%>%
+  ggplot(aes(word, prop, fill = OL)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~OL, scales = "free_y") +
+  coord_flip() +
+  scale_x_reordered() +
+  scale_y_continuous() +
+  labs(x = "Proportion of words",
+       y = NULL)  
+  #theme(text=element_text(size=20))
+
+#ggsave("Figure_13.tiff", ccl, width = 8, height = 8, dpi = 300)
+
+```
